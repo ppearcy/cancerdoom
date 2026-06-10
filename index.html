@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CANCERDOOM</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  body { font-family: 'Courier New', monospace; user-select: none; }
+  #game { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  /* ---- crosshair ---- */
+  #crosshair {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: 24px; height: 24px; pointer-events: none; z-index: 10; display: none;
+  }
+  #crosshair::before, #crosshair::after {
+    content: ''; position: absolute; background: #4dff4d;
+    box-shadow: 0 0 4px #4dff4d;
+  }
+  #crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-50%); clip-path: polygon(0 0, 100% 0, 100% 33%, 0 33%, 0 67%, 100% 67%, 100% 100%, 0 100%); }
+  #crosshair::after { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-50%); clip-path: polygon(0 0, 33% 0, 33% 100%, 0 100%, 67% 0, 100% 0, 100% 100%, 67% 100%); }
+
+  /* ---- damage vignette ---- */
+  #damageFx {
+    position: fixed; inset: 0; pointer-events: none; z-index: 9; opacity: 0;
+    box-shadow: inset 0 0 180px 60px rgba(255, 0, 0, 0.85);
+    transition: opacity 0.35s ease-out;
+  }
+
+  /* ---- HUD ---- */
+  #hud {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 11; display: none;
+    background: linear-gradient(to top, rgba(10,0,5,0.92), rgba(10,0,5,0.75));
+    border-top: 2px solid #5a0f1f;
+    padding: 10px 24px 12px;
+    display: none; justify-content: space-between; align-items: flex-end;
+    text-shadow: 0 0 6px currentColor;
+  }
+  .hudBlock { text-align: center; min-width: 110px; }
+  .hudLabel { color: #b08080; font-size: 12px; letter-spacing: 3px; }
+  .hudValue { font-size: 38px; font-weight: bold; line-height: 1; }
+  #hpVal { color: #ff3b3b; }
+  #ammoVal { color: #ffd23b; }
+  #scoreVal { color: #4dff4d; font-size: 30px; }
+  #waveVal { color: #c84dff; }
+  #killsVal { color: #ff8c3b; font-size: 30px; }
+  #weaponName { color: #7ad7ff; font-size: 14px; letter-spacing: 2px; margin-top: 4px; }
+  #weaponSlots { color: #555; font-size: 12px; margin-top: 2px; letter-spacing: 1px; }
+  #weaponSlots b { color: #7ad7ff; }
+
+  /* ---- overlays ---- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 20;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, rgba(40,0,10,0.88), rgba(0,0,0,0.96));
+    color: #ddd; text-align: center; cursor: pointer;
+  }
+  .title {
+    font-size: 72px; font-weight: bold; letter-spacing: 10px; color: #ff2b2b;
+    text-shadow: 0 0 18px #ff0040, 0 0 50px #80001a; margin-bottom: 8px;
+  }
+  .subtitle { color: #c84dff; letter-spacing: 4px; margin-bottom: 36px; text-shadow: 0 0 10px #c84dff; }
+  .controls { color: #998; font-size: 14px; line-height: 1.9; margin-bottom: 36px; }
+  .controls b { color: #ffd23b; }
+  .clickPrompt { color: #4dff4d; font-size: 22px; letter-spacing: 4px; animation: pulse 1.2s infinite; text-shadow: 0 0 10px #4dff4d; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  #pauseOverlay, #gameOverOverlay { display: none; }
+  #gameOverTitle { font-size: 60px; color: #ff2b2b; letter-spacing: 6px; text-shadow: 0 0 20px #ff0040; margin-bottom: 16px; }
+  #gameOverStats { font-size: 20px; color: #ffd23b; line-height: 2; margin-bottom: 36px; }
+
+  /* ---- wave banner ---- */
+  #waveBanner {
+    position: fixed; left: 50%; top: 22%; transform: translateX(-50%); z-index: 12;
+    font-size: 44px; font-weight: bold; letter-spacing: 8px; color: #c84dff;
+    text-shadow: 0 0 16px #c84dff; opacity: 0; pointer-events: none;
+    transition: opacity 0.5s; white-space: nowrap;
+  }
+  #waveSub {
+    position: fixed; left: 50%; top: 32%; transform: translateX(-50%); z-index: 12;
+    font-size: 16px; letter-spacing: 4px; color: #ff8c3b; text-shadow: 0 0 10px #ff8c3b;
+    opacity: 0; pointer-events: none; transition: opacity 0.5s; white-space: nowrap;
+  }
+  #pickupMsg {
+    position: fixed; left: 50%; bottom: 18%; transform: translateX(-50%); z-index: 12;
+    font-size: 18px; letter-spacing: 3px; color: #4dff4d; text-shadow: 0 0 10px #4dff4d;
+    opacity: 0; pointer-events: none; transition: opacity 0.4s; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+  <div id="game"></div>
+  <div id="crosshair"></div>
+  <div id="damageFx"></div>
+  <div id="waveBanner"></div>
+  <div id="waveSub"></div>
+  <div id="pickupMsg"></div>
+
+  <div id="hud">
+    <div class="hudBlock">
+      <div class="hudLabel">HEALTH</div>
+      <div class="hudValue" id="hpVal">100</div>
+    </div>
+    <div class="hudBlock">
+      <div class="hudLabel">SCORE</div>
+      <div class="hudValue" id="scoreVal">0</div>
+    </div>
+    <div class="hudBlock" style="min-width:220px">
+      <div class="hudLabel">AMMO</div>
+      <div class="hudValue" id="ammoVal">&#8734;</div>
+      <div id="weaponName">ANTIBODY BLASTER</div>
+      <div id="weaponSlots"><b>1</b> BLASTER &nbsp; 2 CHEMO &nbsp; 3 RAD</div>
+    </div>
+    <div class="hudBlock">
+      <div class="hudLabel">CELLS KILLED</div>
+      <div class="hudValue" id="killsVal">0</div>
+    </div>
+    <div class="hudBlock">
+      <div class="hudLabel">WAVE</div>
+      <div class="hudValue" id="waveVal">1</div>
+    </div>
+  </div>
+
+  <div id="startOverlay" class="overlay">
+    <div class="title">CANCERDOOM</div>
+    <div class="subtitle">EXCISE THE MALIGNANCY. SAVE THE PATIENT.</div>
+    <div class="controls">
+      <b>WASD</b> move &nbsp;&middot;&nbsp; <b>MOUSE</b> aim &nbsp;&middot;&nbsp; <b>CLICK</b> fire &nbsp;&middot;&nbsp; <b>SHIFT</b> sprint<br>
+      <b>1 / 2 / 3</b> or <b>WHEEL</b> switch weapons &nbsp;&middot;&nbsp; <b>ESC</b> pause<br><br>
+      Tumor cells divide when wounded &mdash; finish the job.<br>
+      Collect leukocytes for health, canisters for chemo, isotopes for radiation.
+    </div>
+    <div class="clickPrompt">CLICK TO BEGIN TREATMENT</div>
+  </div>
+
+  <div id="pauseOverlay" class="overlay">
+    <div class="title" style="font-size:48px">PAUSED</div>
+    <div class="clickPrompt">CLICK TO RESUME</div>
+  </div>
+
+  <div id="gameOverOverlay" class="overlay">
+    <div id="gameOverTitle">THE CANCER SPREAD</div>
+    <div id="gameOverStats"></div>
+    <div class="clickPrompt">CLICK TO TRY AGAIN</div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./lib/three.module.min.js"
+    }
+  }
+  </script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
