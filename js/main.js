@@ -13,7 +13,12 @@ const EYE_HEIGHT = 1.7;
 const MOVE_SPEED = 11;
 const SPRINT_SPEED = 17;
 const MOUSE_SENS = 0.0022;
+const TOUCH_SENS = 0.0055;
 const MAX_HEALTH = 100;
+
+// touch-first devices (phones/tablets) get on-screen controls and lighter rendering
+const IS_TOUCH = (navigator.maxTouchPoints > 0 || 'ontouchstart' in window)
+  && window.matchMedia('(pointer: coarse)').matches;
 
 // ---------- DOM ----------
 const $ = (id) => document.getElementById(id);
@@ -242,8 +247,8 @@ function makeWallCanvases() {
 }
 
 // ---------- renderer / scene ----------
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: !IS_TOUCH, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_TOUCH ? 1.5 : 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
@@ -277,7 +282,7 @@ playerRig.add(playerLight);
 const overhead = new THREE.DirectionalLight(0xffd0c0, 0.55);
 overhead.position.set(12, 30, 8);
 overhead.castShadow = true;
-overhead.shadow.mapSize.set(2048, 2048);
+overhead.shadow.mapSize.set(IS_TOUCH ? 1024 : 2048, IS_TOUCH ? 1024 : 2048);
 overhead.shadow.camera.left = -55;
 overhead.shadow.camera.right = 55;
 overhead.shadow.camera.top = 55;
@@ -469,7 +474,7 @@ function mergeGeoms(geos) {
 }
 
 // drifting spores for atmosphere
-const SPORE_COUNT = 280;
+const SPORE_COUNT = IS_TOUCH ? 160 : 280;
 const sporeBase = new Float32Array(SPORE_COUNT * 3);
 const sporePhase = new Float32Array(SPORE_COUNT);
 for (let i = 0; i < SPORE_COUNT; i++) {
@@ -561,8 +566,94 @@ document.addEventListener('mousemove', (e) => {
   state.pitch -= e.movementY * MOUSE_SENS;
   state.pitch = Math.max(-1.45, Math.min(1.45, state.pitch));
 });
-document.addEventListener('mousedown', () => { if (state.running) state.firing = true; });
+document.addEventListener('mousedown', () => { if (state.running && !IS_TOUCH) state.firing = true; });
 document.addEventListener('mouseup', () => { state.firing = false; });
+
+// ---------- touch controls ----------
+// left side: floating joystick for movement; right side: drag to aim.
+// dedicated FIRE / WPN / pause buttons live outside the canvas.
+const touchState = { moveId: null, moveOriginX: 0, moveOriginY: 0, moveX: 0, moveY: 0, lookId: null, lookX: 0, lookY: 0 };
+const STICK_RADIUS = 50;
+let pauseTapTime = -1e9; // swallow the ghost click that follows a pause-button tap
+const eatDefault = (e) => { if (e.cancelable) e.preventDefault(); };
+if (IS_TOUCH) {
+  document.body.classList.add('mobile');
+  const stickBase = $('stickBase'), stickKnob = $('stickKnob');
+  const gameEl = $('game');
+
+  const resetStick = () => {
+    touchState.moveId = null;
+    touchState.moveX = touchState.moveY = 0;
+    stickKnob.style.transform = 'translate(-50%, -50%)';
+    stickBase.style.left = '36px';
+    stickBase.style.top = 'auto';
+    stickBase.style.bottom = '110px';
+  };
+
+  gameEl.addEventListener('touchstart', (e) => {
+    eatDefault(e);
+    if (!state.running) return;
+    for (const t of e.changedTouches) {
+      if (t.clientX < window.innerWidth * 0.45 && touchState.moveId === null) {
+        touchState.moveId = t.identifier;
+        touchState.moveOriginX = t.clientX;
+        touchState.moveOriginY = t.clientY;
+        stickBase.style.left = (t.clientX - 60) + 'px';
+        stickBase.style.top = (t.clientY - 60) + 'px';
+        stickBase.style.bottom = 'auto';
+      } else if (touchState.lookId === null) {
+        touchState.lookId = t.identifier;
+        touchState.lookX = t.clientX;
+        touchState.lookY = t.clientY;
+      }
+    }
+  }, { passive: false });
+
+  gameEl.addEventListener('touchmove', (e) => {
+    eatDefault(e);
+    for (const t of e.changedTouches) {
+      if (t.identifier === touchState.moveId) {
+        let dx = t.clientX - touchState.moveOriginX, dy = t.clientY - touchState.moveOriginY;
+        const len = Math.hypot(dx, dy);
+        if (len > STICK_RADIUS) { dx *= STICK_RADIUS / len; dy *= STICK_RADIUS / len; }
+        touchState.moveX = dx / STICK_RADIUS;
+        touchState.moveY = dy / STICK_RADIUS;
+        stickKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+      } else if (t.identifier === touchState.lookId) {
+        state.yaw -= (t.clientX - touchState.lookX) * TOUCH_SENS;
+        state.pitch -= (t.clientY - touchState.lookY) * TOUCH_SENS;
+        state.pitch = Math.max(-1.45, Math.min(1.45, state.pitch));
+        touchState.lookX = t.clientX;
+        touchState.lookY = t.clientY;
+      }
+    }
+  }, { passive: false });
+
+  const onTouchEnd = (e) => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === touchState.moveId) resetStick();
+      else if (t.identifier === touchState.lookId) touchState.lookId = null;
+    }
+  };
+  gameEl.addEventListener('touchend', onTouchEnd);
+  gameEl.addEventListener('touchcancel', onTouchEnd);
+
+  const fireBtn = $('fireBtn');
+  fireBtn.addEventListener('touchstart', (e) => { eatDefault(e); if (state.running) state.firing = true; }, { passive: false });
+  fireBtn.addEventListener('touchend', (e) => { eatDefault(e); state.firing = false; }, { passive: false });
+  fireBtn.addEventListener('touchcancel', () => { state.firing = false; });
+  $('weaponBtn').addEventListener('touchstart', (e) => {
+    eatDefault(e);
+    switchWeapon((currentWeapon + 1) % weapons.length);
+  }, { passive: false });
+  $('pauseBtn').addEventListener('touchstart', (e) => {
+    eatDefault(e);
+    pauseTapTime = performance.now();
+    pauseGame();
+  }, { passive: false });
+
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
+}
 
 // ---------- weapons ----------
 const weapons = [
@@ -1144,7 +1235,8 @@ function gameOver() {
   state.over = true;
   state.running = false;
   state.firing = false;
-  document.exitPointerLock();
+  document.body.classList.remove('playing');
+  if (document.exitPointerLock) document.exitPointerLock();
   $('gameOverStats').innerHTML =
     `MALIGNANT CELLS DESTROYED: ${state.kills}<br>` +
     `WAVES SURVIVED: ${Math.max(0, state.wave - 1)}<br>` +
@@ -1320,10 +1412,16 @@ function updatePlayer(dt, t) {
   if (keys['KeyS'] || keys['ArrowDown']) { mx -= _fwd.x; mz -= _fwd.z; }
   if (keys['KeyD'] || keys['ArrowRight']) { mx += _right.x; mz += _right.z; }
   if (keys['KeyA'] || keys['ArrowLeft']) { mx -= _right.x; mz -= _right.z; }
+  const stickMag = Math.hypot(touchState.moveX, touchState.moveY);
+  if (stickMag > 0.12) { // deadzone
+    mx += _fwd.x * -touchState.moveY + _right.x * touchState.moveX;
+    mz += _fwd.z * -touchState.moveY + _right.z * touchState.moveX;
+  }
   const moving = mx !== 0 || mz !== 0;
   if (moving) {
     const len = Math.hypot(mx, mz);
-    const speed = (keys['ShiftLeft'] || keys['ShiftRight']) ? SPRINT_SPEED : MOVE_SPEED;
+    const sprinting = keys['ShiftLeft'] || keys['ShiftRight'] || stickMag > 0.95;
+    const speed = sprinting ? SPRINT_SPEED : MOVE_SPEED;
     playerRig.position.x += (mx / len) * speed * dt;
     playerRig.position.z += (mz / len) * speed * dt;
     state.bobPhase += dt * speed * 1.1;
@@ -1372,40 +1470,62 @@ function updateWaveFlow(dt) {
   }
 }
 
-// ---------- pointer lock / overlay flow ----------
+// ---------- start / pause flow (pointer lock on desktop, direct on touch) ----------
 let started = false;
-startOverlay.addEventListener('click', () => {
+function enterGame() {
+  startOverlay.style.display = 'none';
+  pauseOverlay.style.display = 'none';
+  hud.style.display = 'flex';
+  crosshair.style.display = 'block';
+  document.body.classList.add('playing');
+  state.running = true;
+  if (!started) {
+    started = true;
+    startWave();
+  }
+}
+function pauseGame() {
+  state.running = false;
+  state.firing = false;
+  document.body.classList.remove('playing');
+  if (!state.over && started) {
+    pauseOverlay.style.display = 'flex';
+    hud.style.display = 'none';
+    crosshair.style.display = 'none';
+  }
+}
+function tryMobileFullscreen() {
+  const el = document.documentElement;
+  try {
+    if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(() => {});
+  } catch (e) { /* iOS Safari: no fullscreen API on iPhone — play inline */ }
+}
+function onOverlayTap() {
+  if (performance.now() - pauseTapTime < 600) return; // ghost click after pause tap
   initAudio();
   if (actx && actx.state === 'suspended') actx.resume();
-  renderer.domElement.requestPointerLock();
-});
-pauseOverlay.addEventListener('click', () => {
-  if (actx && actx.state === 'suspended') actx.resume();
-  renderer.domElement.requestPointerLock();
-});
+  if (IS_TOUCH) {
+    tryMobileFullscreen();
+    enterGame();
+  } else {
+    renderer.domElement.requestPointerLock();
+  }
+}
+startOverlay.addEventListener('click', onOverlayTap);
+pauseOverlay.addEventListener('click', onOverlayTap);
 gameOverOverlay.addEventListener('click', () => location.reload());
 
 document.addEventListener('pointerlockchange', () => {
+  if (IS_TOUCH) return;
   const locked = document.pointerLockElement === renderer.domElement;
-  if (locked) {
-    startOverlay.style.display = 'none';
-    pauseOverlay.style.display = 'none';
-    hud.style.display = 'flex';
-    crosshair.style.display = 'block';
-    state.running = true;
-    if (!started) {
-      started = true;
-      startWave();
-    }
-  } else {
-    state.running = false;
-    state.firing = false;
-    if (!state.over && started) {
-      pauseOverlay.style.display = 'flex';
-      hud.style.display = 'none';
-      crosshair.style.display = 'none';
-    }
-  }
+  if (locked) enterGame();
+  else pauseGame();
+});
+
+// pause when the app is backgrounded (tab switch, phone lock, notification shade)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && state.running) pauseGame();
 });
 
 // ---------- main loop ----------
