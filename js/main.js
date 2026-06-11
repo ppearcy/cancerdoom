@@ -82,63 +82,163 @@ const sfx = {
 };
 
 // ---------- procedural textures ----------
-function canvasTexture(size, painter, repeatX, repeatY) {
+function makeCanvas(size, painter) {
   const c = document.createElement('canvas');
   c.width = c.height = size;
   painter(c.getContext('2d'), size);
-  const tex = new THREE.CanvasTexture(c);
+  return c;
+}
+function toTexture(canvas, repeatX = 1, repeatY = 1, srgb = true) {
+  const tex = new THREE.CanvasTexture(canvas);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(repeatX, repeatY);
-  tex.colorSpace = THREE.SRGBColorSpace;
+  if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
-function paintFloor(ctx, s) {
-  ctx.fillStyle = '#3a1018';
-  ctx.fillRect(0, 0, s, s);
-  for (let i = 0; i < 260; i++) {
-    const x = Math.random() * s, y = Math.random() * s, r = 4 + Math.random() * 26;
+function mottle(ctx, s, count, colors, rMin, rMax) {
+  for (let i = 0; i < count; i++) {
+    const x = Math.random() * s, y = Math.random() * s, r = rMin + Math.random() * (rMax - rMin);
     const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
-    const tone = Math.random();
-    grad.addColorStop(0, tone > 0.5 ? 'rgba(110,30,45,0.5)' : 'rgba(35,8,14,0.6)');
+    grad.addColorStop(0, colors[Math.floor(Math.random() * colors.length)]);
     grad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = grad;
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-  }
-  // capillary streaks
-  ctx.strokeStyle = 'rgba(150,30,40,0.35)';
-  for (let i = 0; i < 40; i++) {
-    ctx.lineWidth = 1 + Math.random() * 2;
-    ctx.beginPath();
-    let x = Math.random() * s, y = Math.random() * s;
-    ctx.moveTo(x, y);
-    for (let j = 0; j < 5; j++) {
-      x += (Math.random() - 0.5) * 60; y += (Math.random() - 0.5) * 60;
-      ctx.lineTo(x, y);
-    }
-    ctx.stroke();
   }
 }
-function paintWall(ctx, s) {
-  ctx.fillStyle = '#5c1f2a';
-  ctx.fillRect(0, 0, s, s);
-  for (let i = 0; i < 200; i++) {
-    const x = Math.random() * s, y = Math.random() * s, r = 6 + Math.random() * 30;
-    const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
-    grad.addColorStop(0, Math.random() > 0.5 ? 'rgba(140,55,70,0.45)' : 'rgba(50,12,20,0.5)');
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+// random-walk vein polylines, reusable across color/bump/emissive maps so they align
+function veinPaths(s, count) {
+  const paths = [];
+  for (let i = 0; i < count; i++) {
+    const pts = [[Math.random() * s, Math.random() * s]];
+    let ang = Math.random() * Math.PI * 2;
+    const segs = 5 + Math.floor(Math.random() * 9);
+    for (let j = 0; j < segs; j++) {
+      ang += (Math.random() - 0.5) * 1.3;
+      const [px, py] = pts[pts.length - 1];
+      const step = s * (0.04 + Math.random() * 0.06);
+      pts.push([px + Math.cos(ang) * step, py + Math.sin(ang) * step]);
+    }
+    paths.push({ pts, w: 1 + Math.random() * 3.5 });
   }
-  // sinew: vertical fibrous strands
-  ctx.strokeStyle = 'rgba(170,60,80,0.3)';
-  for (let i = 0; i < 60; i++) {
-    ctx.lineWidth = 1 + Math.random() * 3;
+  return paths;
+}
+function strokeVeins(ctx, paths, color, widthScale, blur = 0) {
+  ctx.strokeStyle = color;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  if (blur) { ctx.shadowColor = color; ctx.shadowBlur = blur; }
+  for (const p of paths) {
+    ctx.lineWidth = Math.max(0.5, p.w * widthScale);
     ctx.beginPath();
-    let x = Math.random() * s;
-    ctx.moveTo(x, 0);
-    for (let y = 0; y <= s; y += s / 8) ctx.lineTo(x + (Math.random() - 0.5) * 18, y);
+    ctx.moveTo(p.pts[0][0], p.pts[0][1]);
+    for (let i = 1; i < p.pts.length; i++) ctx.lineTo(p.pts[i][0], p.pts[i][1]);
     ctx.stroke();
   }
+  ctx.shadowBlur = 0;
+}
+
+// soft round sprite so point particles don't render as hard squares
+const particleTex = (() => {
+  const c = makeCanvas(64, (ctx, s) => {
+    const g = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.4, 'rgba(255,255,255,0.7)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, s, s);
+  });
+  return new THREE.CanvasTexture(c);
+})();
+
+// floor: raw tissue with arteries and glossy blood pools (roughness map makes pools shine)
+function makeFloorMaps(repeat) {
+  const s = 1024;
+  const pools = [];
+  for (let i = 0; i < 9; i++) pools.push({ x: Math.random() * s, y: Math.random() * s, r: s * (0.04 + Math.random() * 0.08) });
+  const veins = veinPaths(s, 70);
+  const color = makeCanvas(s, (ctx) => {
+    ctx.fillStyle = '#41141b';
+    ctx.fillRect(0, 0, s, s);
+    mottle(ctx, s, 380, ['rgba(118,40,52,0.45)', 'rgba(48,12,18,0.55)', 'rgba(150,72,70,0.25)', 'rgba(88,24,36,0.4)'], 6, 50);
+    strokeVeins(ctx, veins, 'rgba(22,3,7,0.55)', 1.7);
+    strokeVeins(ctx, veins, 'rgba(135,22,32,0.5)', 0.8);
+    for (const p of pools) {
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+      g.addColorStop(0, 'rgba(66,2,8,0.95)');
+      g.addColorStop(0.75, 'rgba(56,2,8,0.85)');
+      g.addColorStop(1, 'rgba(40,2,6,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+    for (let i = 0; i < 2400; i++) {
+      ctx.fillStyle = `rgba(${120 + Math.random() * 80 | 0},${20 + Math.random() * 40 | 0},${30 + Math.random() * 40 | 0},${0.05 + Math.random() * 0.12})`;
+      ctx.fillRect(Math.random() * s, Math.random() * s, 1.5, 1.5);
+    }
+  });
+  const bump = makeCanvas(s, (ctx) => {
+    ctx.fillStyle = '#808080';
+    ctx.fillRect(0, 0, s, s);
+    mottle(ctx, s, 320, ['rgba(255,255,255,0.25)', 'rgba(0,0,0,0.3)'], 5, 45);
+    strokeVeins(ctx, veins, 'rgba(255,255,255,0.45)', 1.2, 3);
+    for (const p of pools) {
+      ctx.fillStyle = 'rgba(70,70,70,0.85)';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 0.9, 0, Math.PI * 2); ctx.fill();
+    }
+  });
+  const rough = makeCanvas(s, (ctx) => {
+    ctx.fillStyle = '#c9c9c9';
+    ctx.fillRect(0, 0, s, s);
+    mottle(ctx, s, 160, ['rgba(120,120,120,0.5)', 'rgba(235,235,235,0.4)'], 8, 60);
+    for (const p of pools) {
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+      g.addColorStop(0, 'rgba(25,25,25,1)');
+      g.addColorStop(0.8, 'rgba(40,40,40,0.9)');
+      g.addColorStop(1, 'rgba(40,40,40,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+  });
+  return {
+    map: toTexture(color, repeat, repeat),
+    bumpMap: toTexture(bump, repeat, repeat, false),
+    roughnessMap: toTexture(rough, repeat, repeat, false),
+  };
+}
+
+// wall canvases (textures are instantiated per wall so UV repeats match wall size)
+function makeWallCanvases() {
+  const s = 512;
+  const veins = veinPaths(s, 30);
+  const color = makeCanvas(s, (ctx) => {
+    ctx.fillStyle = '#541d27';
+    ctx.fillRect(0, 0, s, s);
+    mottle(ctx, s, 260, ['rgba(135,52,66,0.45)', 'rgba(44,10,18,0.55)', 'rgba(160,80,84,0.22)', 'rgba(70,18,28,0.45)'], 6, 38);
+    // vertical sinew strands
+    for (let i = 0; i < 70; i++) {
+      ctx.strokeStyle = `rgba(${130 + Math.random() * 60 | 0},${40 + Math.random() * 30 | 0},${55 + Math.random() * 30 | 0},${0.12 + Math.random() * 0.2})`;
+      ctx.lineWidth = 1 + Math.random() * 3;
+      ctx.beginPath();
+      let x = Math.random() * s;
+      ctx.moveTo(x, 0);
+      for (let y = 0; y <= s; y += s / 8) ctx.lineTo(x + (Math.random() - 0.5) * 20, y);
+      ctx.stroke();
+    }
+    strokeVeins(ctx, veins, 'rgba(20,3,8,0.5)', 1.6);
+    strokeVeins(ctx, veins, 'rgba(150,28,40,0.45)', 0.8);
+  });
+  const bump = makeCanvas(s, (ctx) => {
+    ctx.fillStyle = '#888888';
+    ctx.fillRect(0, 0, s, s);
+    mottle(ctx, s, 240, ['rgba(255,255,255,0.3)', 'rgba(0,0,0,0.35)'], 5, 36);
+    strokeVeins(ctx, veins, 'rgba(255,255,255,0.5)', 1.2, 3);
+  });
+  // glowing arteries — emissive map, pulsed in the render loop
+  const emissive = makeCanvas(s, (ctx) => {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, s, s);
+    strokeVeins(ctx, veins, 'rgba(255,46,60,0.85)', 0.7, 6);
+  });
+  return { color, bump, emissive };
 }
 
 // ---------- renderer / scene ----------
@@ -152,8 +252,8 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 $('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x12030a);
-scene.fog = new THREE.FogExp2(0x1c0510, 0.018);
+scene.background = new THREE.Color(0x0d0207);
+scene.fog = new THREE.FogExp2(0x150409, 0.017);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 250);
 const playerRig = new THREE.Object3D();
@@ -168,31 +268,81 @@ window.addEventListener('resize', () => {
 });
 
 // ---------- lights ----------
-scene.add(new THREE.HemisphereLight(0x8a5560, 0x301017, 1.7));
-const playerLight = new THREE.PointLight(0xffd9b0, 160, 45, 1.6);
+scene.add(new THREE.HemisphereLight(0x8a4a52, 0x241016, 1.05));
+const playerLight = new THREE.PointLight(0xffc9a0, 110, 45, 1.8);
 playerLight.position.set(0, 0.4, 0);
 playerRig.add(playerLight);
 
+// dim overhead light: its only real job is casting grounding shadows
+const overhead = new THREE.DirectionalLight(0xffd0c0, 0.55);
+overhead.position.set(12, 30, 8);
+overhead.castShadow = true;
+overhead.shadow.mapSize.set(2048, 2048);
+overhead.shadow.camera.left = -55;
+overhead.shadow.camera.right = 55;
+overhead.shadow.camera.top = 55;
+overhead.shadow.camera.bottom = -55;
+overhead.shadow.camera.near = 5;
+overhead.shadow.camera.far = 60;
+overhead.shadow.bias = -0.0005;
+scene.add(overhead);
+
+// bio-luminescent accent lights with flicker (animated in the render loop)
+const flickerLights = [];
 [[-28, -28], [28, 28], [-28, 28], [28, -28], [0, 0]].forEach(([x, z], i) => {
-  const l = new THREE.PointLight(i % 2 ? 0xff3050 : 0x16e0c0, 110, 45, 1.7);
+  const l = new THREE.PointLight(i % 2 ? 0xff2838 : 0x18c8a8, i % 2 ? 85 : 60, 42, 1.7);
   l.position.set(x, WALL_HEIGHT - 1.5, z);
   scene.add(l);
+  flickerLights.push({ light: l, base: l.intensity, speed: 5 + Math.random() * 7, phase: Math.random() * 10 });
+});
+// dim warm fill along the mid-walls so the far field isn't a black void
+[[0, -40], [0, 40], [-40, 0], [40, 0]].forEach(([x, z]) => {
+  const l = new THREE.PointLight(0xff5a40, 50, 38, 1.8);
+  l.position.set(x, WALL_HEIGHT - 2, z);
+  scene.add(l);
+  flickerLights.push({ light: l, base: l.intensity, speed: 4 + Math.random() * 5, phase: Math.random() * 10 });
 });
 
 // ---------- level geometry / colliders ----------
 const wallBoxes = []; // {minX,maxX,minZ,maxZ}
 const wallMeshes = [];
-const wallMat = new THREE.MeshStandardMaterial({
-  map: canvasTexture(512, paintWall, 1, 1), roughness: 0.85, metalness: 0.05,
-});
+const wallMats = []; // shared list so artery glow can pulse in the render loop
+const wallCanvases = makeWallCanvases();
+
+// tessellated box with position-hashed jitter — organic, but still welded
+function organicBox(w, h, d) {
+  const geo = new THREE.BoxGeometry(
+    w, h, d,
+    Math.max(1, Math.round(w / 1.2)), Math.max(2, Math.round(h / 1.2)), Math.max(1, Math.round(d / 1.2))
+  );
+  const pos = geo.attributes.position;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const n = Math.sin(v.x * 1.9 + v.y * 1.3) * Math.sin(v.y * 2.3 + v.z * 1.7) * Math.sin(v.z * 2.1 + v.x * 1.1);
+    v.multiplyScalar(1 + n * 0.035);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
+}
 
 function addWall(cx, cz, w, d) {
   wallBoxes.push({ minX: cx - w / 2, maxX: cx + w / 2, minZ: cz - d / 2, maxZ: cz + d / 2 });
-  const mat = wallMat.clone();
-  mat.map = wallMat.map.clone();
-  mat.map.repeat.set(Math.max(w, d) / 5, WALL_HEIGHT / 5);
-  mat.map.needsUpdate = true;
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_HEIGHT, d), mat);
+  const rx = Math.max(w, d) / 6, ry = WALL_HEIGHT / 6;
+  const mat = new THREE.MeshStandardMaterial({
+    map: toTexture(wallCanvases.color, rx, ry),
+    bumpMap: toTexture(wallCanvases.bump, rx, ry, false),
+    bumpScale: 0.8,
+    emissiveMap: toTexture(wallCanvases.emissive, rx, ry),
+    emissive: 0xff2233,
+    emissiveIntensity: 0.25,
+    roughness: 0.72,
+    metalness: 0.0,
+  });
+  wallMats.push(mat);
+  const mesh = new THREE.Mesh(organicBox(w, WALL_HEIGHT, d), mat);
   mesh.position.set(cx, WALL_HEIGHT / 2, cz);
   mesh.castShadow = mesh.receiveShadow = true;
   scene.add(mesh);
@@ -219,9 +369,13 @@ addWall(10, 32, 16, 3);
 addWall(-10, -32, 16, 3);
 
 // floor + ceiling
+const floorMaps = makeFloorMaps(7);
 const floorMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(ARENA_HALF * 2 + 8, ARENA_HALF * 2 + 8),
-  new THREE.MeshStandardMaterial({ map: canvasTexture(1024, paintFloor, 10, 10), roughness: 0.9 })
+  new THREE.MeshStandardMaterial({
+    map: floorMaps.map, bumpMap: floorMaps.bumpMap, bumpScale: 0.7,
+    roughnessMap: floorMaps.roughnessMap, roughness: 1,
+  })
 );
 floorMesh.rotation.x = -Math.PI / 2;
 floorMesh.receiveShadow = true;
@@ -229,11 +383,118 @@ scene.add(floorMesh);
 
 const ceilMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(ARENA_HALF * 2 + 8, ARENA_HALF * 2 + 8),
-  new THREE.MeshStandardMaterial({ map: canvasTexture(512, paintWall, 8, 8), roughness: 0.95, color: 0x885566 })
+  new THREE.MeshStandardMaterial({
+    map: toTexture(wallCanvases.color, 9, 9),
+    bumpMap: toTexture(wallCanvases.bump, 9, 9, false),
+    bumpScale: 0.6,
+    emissiveMap: toTexture(wallCanvases.emissive, 9, 9),
+    emissive: 0xff2233, emissiveIntensity: 0.18,
+    roughness: 0.9, color: 0x6a4550,
+  })
 );
 ceilMesh.rotation.x = Math.PI / 2;
 ceilMesh.position.y = WALL_HEIGHT;
 scene.add(ceilMesh);
+
+// merge helper for static decor / enemy parts (keeps draw calls down)
+function mergeGeoms(geos) {
+  const nis = geos.map((g) => (g.index ? g.toNonIndexed() : g));
+  let total = 0;
+  for (const g of nis) total += g.attributes.position.count;
+  const merged = new THREE.BufferGeometry();
+  for (const name of ['position', 'normal', 'uv']) {
+    const itemSize = name === 'uv' ? 2 : 3;
+    const arr = new Float32Array(total * itemSize);
+    let off = 0;
+    for (const g of nis) {
+      const a = g.attributes[name];
+      if (a) arr.set(a.array, off);
+      off += g.attributes.position.count * itemSize;
+    }
+    merged.setAttribute(name, new THREE.BufferAttribute(arr, itemSize));
+  }
+  return merged;
+}
+
+// ---------- organic set dressing ----------
+{
+  // polyp clusters hugging the wall bases
+  const polypGeos = [], pusGeos = [];
+  const spots = [];
+  for (let i = 0; i < 30; i++) {
+    const side = i % 4;
+    const t = (Math.random() * 2 - 1) * (ARENA_HALF - 4);
+    const m = ARENA_HALF - 0.9;
+    spots.push(side === 0 ? [t, -m] : side === 1 ? [t, m] : side === 2 ? [-m, t] : [m, t]);
+  }
+  [[-20, 0], [20, 0], [0, -20], [0, 20], [-13, -13], [13, 13], [-13, 13], [13, -13], [-32, 10], [32, -10], [10, 32], [-10, -32]]
+    .forEach(([x, z]) => spots.push([x + 2.6, z + 2.6], [x - 2.6, z - 2.6]));
+  for (const [x, z] of spots) {
+    const n = 3 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < n; i++) {
+      const r = 0.18 + Math.random() * 0.5;
+      const geo = new THREE.IcosahedronGeometry(r, 1);
+      lumpify(geo, 0.25, Math.random() * 9, Math.random() * 9, Math.random() * 9);
+      geo.translate(x + (Math.random() - 0.5) * 1.8, r * 0.55, z + (Math.random() - 0.5) * 1.8);
+      (Math.random() < 0.25 ? pusGeos : polypGeos).push(geo);
+    }
+  }
+  const polyps = new THREE.Mesh(mergeGeoms(polypGeos), new THREE.MeshStandardMaterial({
+    map: toTexture(wallCanvases.color, 2, 2), bumpMap: toTexture(wallCanvases.bump, 2, 2, false),
+    bumpScale: 0.4, color: 0xa06068, roughness: 0.5,
+  }));
+  polyps.castShadow = polyps.receiveShadow = true;
+  scene.add(polyps);
+  const pus = new THREE.Mesh(mergeGeoms(pusGeos), new THREE.MeshStandardMaterial({
+    color: 0xa8854a, emissive: 0x3a2c0c, emissiveIntensity: 0.4, roughness: 0.3,
+  }));
+  scene.add(pus);
+
+  // sinew tendrils hanging from the ceiling
+  const tendrilGeos = [];
+  for (let i = 0; i < 42; i++) {
+    const x = (Math.random() * 2 - 1) * (ARENA_HALF - 3), z = (Math.random() * 2 - 1) * (ARENA_HALF - 3);
+    const len = 0.8 + Math.random() * 1.9;
+    const curve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(x, WALL_HEIGHT + 0.2, z),
+      new THREE.Vector3(x + (Math.random() - 0.5) * 0.5, WALL_HEIGHT - len * 0.5, z + (Math.random() - 0.5) * 0.5),
+      new THREE.Vector3(x + (Math.random() - 0.5) * 1.0, WALL_HEIGHT - len, z + (Math.random() - 0.5) * 1.0),
+    ]);
+    tendrilGeos.push(new THREE.TubeGeometry(curve, 6, 0.04 + Math.random() * 0.09, 5));
+  }
+  const hangers = new THREE.Mesh(mergeGeoms(tendrilGeos), new THREE.MeshStandardMaterial({
+    color: 0x5a1c26, roughness: 0.55,
+  }));
+  scene.add(hangers);
+}
+
+// drifting spores for atmosphere
+const SPORE_COUNT = 280;
+const sporeBase = new Float32Array(SPORE_COUNT * 3);
+const sporePhase = new Float32Array(SPORE_COUNT);
+for (let i = 0; i < SPORE_COUNT; i++) {
+  sporeBase[i * 3] = (Math.random() * 2 - 1) * (ARENA_HALF - 1);
+  sporeBase[i * 3 + 1] = 0.4 + Math.random() * (WALL_HEIGHT - 1);
+  sporeBase[i * 3 + 2] = (Math.random() * 2 - 1) * (ARENA_HALF - 1);
+  sporePhase[i] = Math.random() * Math.PI * 2;
+}
+const sporeGeo = new THREE.BufferGeometry();
+sporeGeo.setAttribute('position', new THREE.BufferAttribute(sporeBase.slice(), 3));
+const sporePoints = new THREE.Points(sporeGeo, new THREE.PointsMaterial({
+  color: 0xff9090, size: 0.11, map: particleTex, transparent: true, opacity: 0.5,
+  blending: THREE.AdditiveBlending, depthWrite: false,
+}));
+scene.add(sporePoints);
+function updateSpores(t) {
+  const pos = sporeGeo.attributes.position;
+  for (let i = 0; i < SPORE_COUNT; i++) {
+    const p = sporePhase[i];
+    pos.array[i * 3] = sporeBase[i * 3] + Math.sin(t * 0.25 + p) * 0.9;
+    pos.array[i * 3 + 1] = sporeBase[i * 3 + 1] + Math.sin(t * 0.4 + p * 1.7) * 0.5;
+    pos.array[i * 3 + 2] = sporeBase[i * 3 + 2] + Math.cos(t * 0.22 + p) * 0.9;
+  }
+  pos.needsUpdate = true;
+}
 
 // circle-vs-AABB collision resolution, shared by player and enemies
 function resolveWalls(pos, radius) {
@@ -357,23 +618,23 @@ let viewRecoil = 0;
 
 // ---------- enemies ----------
 const enemyTiers = [
-  { radius: 0.85, hp: 14, speed: 7.0, color: 0xa6ff2e, emissive: 0x3a6b00, score: 25, damage: 6 },
-  { radius: 1.45, hp: 32, speed: 4.8, color: 0x7ad12c, emissive: 0x2a4d08, score: 50, damage: 10 },
-  { radius: 2.2, hp: 65, speed: 3.2, color: 0x4f8a1e, emissive: 0x1c3305, score: 100, damage: 16 },
+  { radius: 0.85, hp: 14, speed: 7.0, color: 0xb9c22e, score: 25, damage: 6 },
+  { radius: 1.45, hp: 32, speed: 4.8, color: 0xd14848, score: 50, damage: 10 },
+  { radius: 2.2, hp: 65, speed: 3.2, color: 0x9a40c0, score: 100, damage: 16 },
 ];
-const spitterDef = { radius: 1.5, hp: 40, speed: 3.6, color: 0xc62ed1, emissive: 0x4d0a55, score: 150, damage: 9 };
+const spitterDef = { radius: 1.5, hp: 40, speed: 3.6, color: 0xe040d0, score: 150, damage: 9 };
 
 const enemies = [];
 const enemyRoot = new THREE.Group();
 scene.add(enemyRoot);
 
 // position-hashed displacement keeps duplicated vertices welded (no cracks)
-function lumpify(geo, amount, s1, s2, s3) {
+function lumpify(geo, amount, s1, s2, s3, freq = 1) {
   const pos = geo.attributes.position;
   const v = new THREE.Vector3();
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i);
-    const n = Math.sin(v.x * 3.1 + s1) * Math.sin(v.y * 2.7 + s2) * Math.sin(v.z * 3.4 + s3);
+    const n = Math.sin(v.x * 3.1 * freq + s1) * Math.sin(v.y * 2.7 * freq + s2) * Math.sin(v.z * 3.4 * freq + s3);
     v.multiplyScalar(1 + n * amount);
     pos.setXYZ(i, v.x, v.y, v.z);
   }
@@ -381,40 +642,219 @@ function lumpify(geo, amount, s1, s2, s3) {
   geo.computeVertexNormals();
 }
 
+// tumor skin palettes: sickly pus, inflamed flesh, necrotic violet, toxic magenta
+const cellPalettes = [
+  {
+    base: '#6e681e', blotches: ['rgba(50,48,10,0.5)', 'rgba(150,146,70,0.35)', 'rgba(95,76,24,0.4)', 'rgba(40,32,6,0.45)'],
+    veinDark: 'rgba(40,46,6,0.6)', veinMid: 'rgba(130,150,40,0.5)',
+    glow: 'rgba(170,255,70,0.9)', glowSoft: 'rgba(130,210,50,0.3)', tendril: 0x6a7026,
+  },
+  {
+    base: '#8e3038', blotches: ['rgba(90,16,24,0.5)', 'rgba(192,80,88,0.35)', 'rgba(130,40,50,0.4)', 'rgba(45,8,12,0.45)'],
+    veinDark: 'rgba(48,6,12,0.6)', veinMid: 'rgba(190,60,50,0.5)',
+    glow: 'rgba(255,90,58,0.9)', glowSoft: 'rgba(220,60,40,0.3)', tendril: 0x7a2830,
+  },
+  {
+    base: '#4f2350', blotches: ['rgba(42,14,46,0.55)', 'rgba(122,64,120,0.35)', 'rgba(70,30,72,0.4)', 'rgba(20,6,24,0.5)'],
+    veinDark: 'rgba(28,5,32,0.6)', veinMid: 'rgba(150,70,160,0.5)',
+    glow: 'rgba(192,80,255,0.9)', glowSoft: 'rgba(150,60,210,0.3)', tendril: 0x4a2050,
+  },
+  {
+    base: '#6e2068', blotches: ['rgba(56,10,54,0.55)', 'rgba(160,64,160,0.35)', 'rgba(100,30,96,0.4)', 'rgba(25,4,26,0.5)'],
+    veinDark: 'rgba(36,4,36,0.6)', veinMid: 'rgba(220,70,200,0.5)',
+    glow: 'rgba(255,70,225,0.95)', glowSoft: 'rgba(220,50,190,0.35)', tendril: 0x7a2470,
+  },
+];
+
+function makeCellSkin(p) {
+  const s = 256;
+  const veins = veinPaths(s, 24);
+  const color = makeCanvas(s, (ctx) => {
+    ctx.fillStyle = p.base;
+    ctx.fillRect(0, 0, s, s);
+    mottle(ctx, s, 150, p.blotches, 5, 40);
+    strokeVeins(ctx, veins, p.veinDark, 1.4);
+    strokeVeins(ctx, veins, p.veinMid, 0.6);
+  });
+  const bump = makeCanvas(s, (ctx) => {
+    ctx.fillStyle = '#909090';
+    ctx.fillRect(0, 0, s, s);
+    mottle(ctx, s, 130, ['rgba(255,255,255,0.35)', 'rgba(0,0,0,0.35)'], 4, 30);
+    strokeVeins(ctx, veins, 'rgba(255,255,255,0.6)', 1.2, 2);
+  });
+  const emissive = makeCanvas(s, (ctx) => {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, s, s);
+    strokeVeins(ctx, veins, p.glow, 0.9, 5);
+    mottle(ctx, s, 12, [p.glowSoft], 10, 36);
+  });
+  return {
+    map: toTexture(color), bumpMap: toTexture(bump, 1, 1, false), emissiveMap: toTexture(emissive),
+  };
+}
+
+// shared material sets per palette; only the membrane is cloned per enemy (for hit flash)
+function makePaletteMats(p) {
+  const skin = makeCellSkin(p);
+  return {
+    membrane: new THREE.MeshPhysicalMaterial({
+      map: skin.map, bumpMap: skin.bumpMap, bumpScale: 1.0,
+      emissiveMap: skin.emissiveMap, emissive: 0xffffff, emissiveIntensity: 0.5,
+      roughness: 0.38, clearcoat: 0.55, clearcoatRoughness: 0.3,
+    }),
+    spur: new THREE.MeshStandardMaterial({ color: 0xd9cba6, roughness: 0.55 }),
+    tendril: new THREE.MeshStandardMaterial({ color: p.tendril, roughness: 0.5 }),
+    lesion: new THREE.MeshStandardMaterial({ color: 0x1c0a14, roughness: 0.95 }),
+    gullet: new THREE.MeshStandardMaterial({ color: 0x0d0306, emissive: 0x550a12, emissiveIntensity: 0.6, roughness: 0.8 }),
+    fang: new THREE.MeshStandardMaterial({ color: 0xe8ddc0, roughness: 0.35 }),
+  };
+}
+enemyTiers.forEach((def, i) => { def.mats = makePaletteMats(cellPalettes[i]); });
+spitterDef.mats = makePaletteMats(cellPalettes[3]);
+
+// jaundiced bloodshot eyeball; iris sits at +X on the sphere's UV layout
+function makeEyeTexture() {
+  const s = 128;
+  const c = makeCanvas(s, (ctx) => {
+    ctx.fillStyle = '#ddd2bc';
+    ctx.fillRect(0, 0, s, s);
+    const cx = s / 2, cy = s / 2;
+    ctx.strokeStyle = 'rgba(170,30,30,0.55)';
+    for (let i = 0; i < 30; i++) {
+      const a = Math.random() * Math.PI * 2;
+      let x = cx + Math.cos(a) * s * 0.16, y = cy + Math.sin(a) * s * 0.16;
+      ctx.lineWidth = 0.5 + Math.random();
+      ctx.beginPath(); ctx.moveTo(x, y);
+      for (let j = 0; j < 4; j++) {
+        x += Math.cos(a + (Math.random() - 0.5)) * s * 0.1;
+        y += Math.sin(a + (Math.random() - 0.5)) * s * 0.1;
+        ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+    const ir = s * 0.15;
+    const g = ctx.createRadialGradient(cx, cy, ir * 0.2, cx, cy, ir);
+    g.addColorStop(0, '#c8b418');
+    g.addColorStop(0.8, '#6e2406');
+    g.addColorStop(1, '#160803');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx, cy, ir, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.ellipse(cx, cy, ir * 0.2, ir * 0.78, 0, 0, Math.PI * 2); ctx.fill();
+  });
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const eyeTex = makeEyeTexture();
+// faint emissive on the same map so the eyes shine out of the dark
+const eyeMat = new THREE.MeshStandardMaterial({
+  map: eyeTex, roughness: 0.18,
+  emissiveMap: eyeTex, emissive: 0xffb030, emissiveIntensity: 0.22,
+});
+
+const _up = new THREE.Vector3(0, 1, 0);
+const _xAxis = new THREE.Vector3(1, 0, 0);
+const _zAxis = new THREE.Vector3(0, 0, 1);
+const _mtx = new THREE.Matrix4();
+const _quat = new THREE.Quaternion();
+const _one = new THREE.Vector3(1, 1, 1);
+
 function buildCellMesh(def, isSpitter) {
   const group = new THREE.Group();
-  const geo = new THREE.IcosahedronGeometry(def.radius, 2);
-  lumpify(geo, 0.18, Math.random() * 10, Math.random() * 10, Math.random() * 10);
-  const mat = new THREE.MeshStandardMaterial({
-    color: def.color, emissive: def.emissive, roughness: 0.55, flatShading: true,
-  });
+  const M = def.mats;
+  const r = def.radius;
+
+  // membrane: two octaves of lumps, wet veined skin
+  const geo = new THREE.IcosahedronGeometry(r, r >= 1.4 ? 4 : 3);
+  const s1 = Math.random() * 10, s2 = Math.random() * 10, s3 = Math.random() * 10;
+  lumpify(geo, 0.14, s1, s2, s3);
+  lumpify(geo, 0.06, s3, s1, s2, 2.6);
+  const mat = M.membrane.clone();
   const body = new THREE.Mesh(geo, mat);
   body.castShadow = true;
   group.add(body);
 
-  // malignant spikes
-  const spikeMat = new THREE.MeshStandardMaterial({
-    color: isSpitter ? 0xff5ce0 : 0xd8ff70, emissive: isSpitter ? 0x801060 : 0x405510,
-    roughness: 0.4, flatShading: true,
-  });
-  const spikeCount = 8 + Math.floor(Math.random() * 6);
-  const up = new THREE.Vector3(0, 1, 0);
-  for (let i = 0; i < spikeCount; i++) {
-    const dir = new THREE.Vector3().randomDirection();
-    const spike = new THREE.Mesh(
-      new THREE.ConeGeometry(def.radius * 0.13, def.radius * (0.4 + Math.random() * 0.35), 6), spikeMat);
-    spike.quaternion.setFromUnitVectors(up, dir);
-    spike.position.copy(dir).multiplyScalar(def.radius * 0.92);
-    group.add(spike);
+  // bone spurs (kept clear of the face at +Z, which always turns to the player)
+  const spurGeos = [];
+  const spurCount = 7 + Math.floor(Math.random() * 5);
+  for (let i = 0; i < spurCount; i++) {
+    let dir;
+    do { dir = new THREE.Vector3().randomDirection(); } while (dir.z > 0.72);
+    const g = new THREE.ConeGeometry(r * 0.08, r * (0.45 + Math.random() * 0.5), 5);
+    _quat.setFromUnitVectors(_up, dir);
+    _mtx.compose(dir.clone().multiplyScalar(r * 0.92), _quat, _one);
+    g.applyMatrix4(_mtx);
+    spurGeos.push(g);
   }
-  // dark lesions on the membrane
-  const lesionMat = new THREE.MeshStandardMaterial({ color: 0x2a1230, roughness: 0.9, flatShading: true });
-  for (let i = 0; i < 5; i++) {
-    const dir = new THREE.Vector3().randomDirection();
-    const lesion = new THREE.Mesh(new THREE.IcosahedronGeometry(def.radius * 0.22, 1), lesionMat);
-    lesion.position.copy(dir).multiplyScalar(def.radius * 0.95);
-    group.add(lesion);
+  group.add(new THREE.Mesh(mergeGeoms(spurGeos), M.spur));
+
+  // tendrils drooping under their own weight
+  const tenGeos = [];
+  const tenCount = 8 + Math.floor(Math.random() * 5);
+  for (let i = 0; i < tenCount; i++) {
+    let dir;
+    do { dir = new THREE.Vector3().randomDirection(); } while (dir.z > 0.8);
+    const j = () => (Math.random() - 0.5) * r * 0.35;
+    const curve = new THREE.CatmullRomCurve3([
+      dir.clone().multiplyScalar(r * 0.9),
+      dir.clone().multiplyScalar(r * 1.25).add(new THREE.Vector3(j(), j() - r * 0.08, j())),
+      dir.clone().multiplyScalar(r * 1.5).add(new THREE.Vector3(j(), j() - r * 0.3, j())),
+      dir.clone().multiplyScalar(r * 1.62).add(new THREE.Vector3(j(), j() - r * 0.55, j())),
+    ]);
+    tenGeos.push(new THREE.TubeGeometry(curve, 7, r * 0.045, 5));
   }
+  group.add(new THREE.Mesh(mergeGeoms(tenGeos), M.tendril));
+
+  // necrotic lesions
+  const lesionGeos = [];
+  for (let i = 0; i < 6; i++) {
+    const dir = new THREE.Vector3().randomDirection();
+    const g = new THREE.IcosahedronGeometry(r * (0.14 + Math.random() * 0.14), 1);
+    lumpify(g, 0.3, Math.random() * 9, Math.random() * 9, Math.random() * 9);
+    g.translate(dir.x * r * 0.96, dir.y * r * 0.96, dir.z * r * 0.96);
+    lesionGeos.push(g);
+  }
+  group.add(new THREE.Mesh(mergeGeoms(lesionGeos), M.lesion));
+
+  // lamprey maw on the leading face
+  {
+    const dir = new THREE.Vector3(0, -0.18, 1).normalize();
+    const m = r * 0.4;
+    const maw = new THREE.Group();
+    maw.position.copy(dir).multiplyScalar(r * 0.8);
+    maw.quaternion.setFromUnitVectors(_zAxis, dir);
+    const gullet = new THREE.Mesh(new THREE.SphereGeometry(m, 12, 8), M.gullet);
+    gullet.scale.z = 0.55;
+    maw.add(gullet);
+    const fangGeos = [];
+    const teeth = 9;
+    for (let i = 0; i < teeth; i++) {
+      const a = (i / teeth) * Math.PI * 2 + Math.random() * 0.3;
+      const g = new THREE.ConeGeometry(m * 0.16, m * (0.5 + Math.random() * 0.25), 5);
+      _quat.setFromUnitVectors(_up, new THREE.Vector3(-Math.cos(a) * 0.8, -Math.sin(a) * 0.8, 0.55).normalize());
+      _mtx.compose(new THREE.Vector3(Math.cos(a) * m * 0.82, Math.sin(a) * m * 0.82, m * 0.34), _quat, _one);
+      g.applyMatrix4(_mtx);
+      fangGeos.push(g);
+    }
+    maw.add(new THREE.Mesh(mergeGeoms(fangGeos), M.fang));
+    group.add(maw);
+  }
+
+  // bloodshot eyes; irises converge on the player since the group faces them
+  const eyeCount = isSpitter ? 1 : 2 + Math.floor(Math.random() * 2);
+  for (let i = 0; i < eyeCount; i++) {
+    const er = r * (isSpitter ? 0.3 : 0.15 + Math.random() * 0.09);
+    const dir = isSpitter
+      ? new THREE.Vector3(0, 0.35, 1).normalize()
+      : new THREE.Vector3((Math.random() - 0.5) * 1.2, 0.25 + Math.random() * 0.5, 1).normalize();
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(er, 12, 10), eyeMat);
+    eye.position.copy(dir).multiplyScalar(r * 0.93);
+    const gaze = dir.clone().multiplyScalar(0.35).add(_zAxis).normalize();
+    eye.quaternion.setFromUnitVectors(_xAxis, gaze);
+    group.add(eye);
+  }
+
   return { group, body, mat };
 }
 
@@ -446,6 +886,7 @@ function killEnemy(enemy, hitDir) {
   enemies.splice(idx, 1);
   enemyRoot.remove(enemy.group);
   disposeGroup(enemy.group);
+  enemy.mat.dispose();
   state.kills++;
   state.score += enemy.def.score;
 
@@ -468,10 +909,11 @@ function killEnemy(enemy, hitDir) {
   updateHUD();
 }
 
+// geometries are unique per enemy; materials/textures are shared, except the
+// cloned membrane material which killEnemy disposes explicitly
 function disposeGroup(group) {
   group.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
-    if (o.material) o.material.dispose();
   });
 }
 
@@ -504,7 +946,8 @@ function burstParticles(origin, count, color, spread) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   const mat = new THREE.PointsMaterial({
-    color, size: 0.22, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false,
+    color, size: 0.26, map: particleTex, transparent: true, opacity: 1,
+    blending: THREE.AdditiveBlending, depthWrite: false,
   });
   const points = new THREE.Points(geo, mat);
   scene.add(points);
@@ -761,17 +1204,19 @@ function updateEnemies(dt, t) {
     if (e.scale < 1) {
       e.scale = Math.min(1, e.scale + dt * 2.2);
     }
-    const pulse = 1 + Math.sin(t * 3 + e.pulsePhase) * 0.06;
-    e.group.scale.setScalar(e.scale * pulse);
+    // asymmetric breathing squash-and-stretch
+    const pulse = 1 + Math.sin(t * 3 + e.pulsePhase) * 0.05;
+    const pulseY = 1 + Math.sin(t * 3.4 + e.pulsePhase * 1.3) * 0.08;
+    e.group.scale.set(e.scale * pulse, e.scale * pulseY, e.scale * pulse);
 
-    // hit flash
+    // hit flash: overbright body + hot veins, else slow vein throb
     if (e.flash > 0) {
       e.flash -= dt;
-      e.mat.emissive.setHex(0xffffff);
-      e.mat.emissiveIntensity = 0.9;
+      e.mat.color.setRGB(3, 3, 3);
+      e.mat.emissiveIntensity = 2.5;
     } else {
-      e.mat.emissive.setHex(e.def.emissive);
-      e.mat.emissiveIntensity = 1;
+      e.mat.color.setRGB(1, 1, 1);
+      e.mat.emissiveIntensity = 0.55 + Math.sin(t * 3.5 + e.pulsePhase) * 0.3;
     }
 
     _toPlayer.set(playerRig.position.x - e.pos.x, 0, playerRig.position.z - e.pos.z);
@@ -809,7 +1254,7 @@ function updateEnemies(dt, t) {
     e.pos.x += (moveX * e.def.speed + _sep.x * 4) * dt;
     e.pos.z += (moveZ * e.def.speed + _sep.z * 4) * dt;
     resolveWalls(e.pos, e.def.radius * 0.85);
-    e.pos.y = e.def.radius * e.scale * pulse * 0.95;
+    e.pos.y = e.def.radius * e.scale * pulseY * 0.95;
 
     // tumble toward the player as it rolls forward
     e.group.rotation.y = Math.atan2(_toPlayer.x, _toPlayer.z);
@@ -966,9 +1411,11 @@ document.addEventListener('pointerlockchange', () => {
 // ---------- main loop ----------
 const clock = new THREE.Clock();
 let elapsed = 0;
+let worldTime = 0;
 function animate() {
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
+  worldTime += dt;
   if (state.running) {
     elapsed += dt;
     updatePlayer(dt, elapsed);
@@ -977,6 +1424,14 @@ function animate() {
     updateWaveFlow(dt);
     updatePickups(dt, elapsed);
   }
+  // living-organ ambience: flickering lights, throbbing arteries, drifting spores
+  for (const f of flickerLights) {
+    f.light.intensity = f.base * (0.78 + 0.22 * Math.sin(worldTime * f.speed + f.phase) + (Math.random() - 0.5) * 0.1);
+  }
+  const arteryGlow = 0.05 + Math.max(0, Math.sin(worldTime * 1.7)) * 0.13;
+  for (const m of wallMats) m.emissiveIntensity = arteryGlow;
+  ceilMesh.material.emissiveIntensity = arteryGlow * 0.35;
+  updateSpores(worldTime);
   updateParticles(dt);
   updateTracers(dt);
   renderer.render(scene, camera);
